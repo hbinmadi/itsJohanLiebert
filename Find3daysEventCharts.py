@@ -6,9 +6,13 @@ from plotly.subplots import make_subplots
 from dash import Dash, html, dcc, Input, Output, State, callback_context
 import gc
 import time
+import GetDataForGGBackTest as GGData
 # Connect to the SQLite database
 db_path = 'data/IntradayGGData.db'  # Replace with the path to your database file
 conn = sqlite3.connect(db_path)
+
+#GGData.GetReadyForCharts(WhichSymbol="BankNifty", db_path=db_path, tf='5minute', NoOfDays=1400)
+
 
 # Load the data from the BankNifty table
 banknifty_data = pd.read_sql_query("SELECT * FROM banknifty;", conn)
@@ -34,7 +38,7 @@ daily_range = banknifty_data.groupby('date').agg(
 daily_range['range'] = daily_range['daily_high'] - daily_range['daily_low']
 
 # Filter days with a one-sided move of 500 points or more
-one_sided_days = daily_range[daily_range['range'] >= 500].copy()
+one_sided_days = daily_range[daily_range['range'] >= 350].copy()
 
 
 # Add previous and next days
@@ -118,21 +122,26 @@ print("Loading data is called.... once")
 # Initialize the Dash app
 app = Dash(__name__)
 
-# Update slider marks dynamically
 app.layout = html.Div([
-    dcc.Graph(id='candlestick-chart'),
-    dcc.Slider(
-        id='chart-slider',
-        min=0,
-        max=len(significant_days) - 1,
-        value=0,
-        marks={i: significant_days['date'].iloc[i].strftime('%Y-%m-%d') for i in range(len(significant_days))},
-        step=1,
-    ),
     html.Div([
-        html.Button('Previous', id='previous-button', n_clicks=0),
-        html.Button('Next', id='next-button', n_clicks=0)
-    ]),
+        dcc.Slider(
+            id='chart-slider',
+            min=0,
+            max=len(significant_days) - 1,
+            value=0,
+            marks={i: significant_days['date'].iloc[i].strftime('%Y-%m-%d') for i in range(len(significant_days))},
+            step=1,
+            updatemode='drag',  # Updates the slider value on drag for better UX
+            tooltip={"placement": "bottom", "always_visible": True}
+
+        ),
+        html.Div([
+            html.Button('Previous', id='previous-button', n_clicks=0),
+            html.Button('Next', id='next-button', n_clicks=0),
+        ], style={'display': 'inline-block', 'margin-left': '80px'})
+    ], style={'width': '90%', 'display': 'flex', 'justify-content': 'center', 'align-items': 'center', 'margin': '20px 0'}),
+
+    dcc.Graph(id='candlestick-chart'),
 ])
 
 @app.callback(
@@ -169,14 +178,15 @@ def update_chart(slider_value):
         # Close the connection
         conn.close()
         days_to_plot['date'] = pd.to_datetime(days_to_plot['date'])
-        # Find existing dates
+        days_to_plot['datetime'] = pd.to_datetime(days_to_plot['datetime'])
+        # # Find existing dates
         # existing_dates = days_to_plot['date'].unique()
-        #
-        # # Calculate missing dates within the selected range
-        # # Find the missing dates within the range
+        # #
+        # # # Calculate missing dates within the selected range
+        # # # Find the missing dates within the range
         # datemissing = GetMissingDatesInRange(days_to_plot['date'].min(), days_to_plot['date'].max(), existing_dates)
-        #
-        # # Convert missing dates back to datetime format
+        # #
+        # # # Convert missing dates back to datetime format
         # datemissing = pd.to_datetime(datemissing)
         # print('datemissing',datemissing)
         # Filter the data
@@ -213,23 +223,83 @@ def update_chart(slider_value):
                              name='Weighted Volume',
                              marker=dict(color=days_to_plot['volume_color'])),
                       row=3, col=1)
+        # Example: Adding annotations on top of volume bars
+        for i, row in days_to_plot.iterrows():
+            if row['datetime'].minute % 60 == 0:  # Check if the time is at a 30-minute interval
+                fig.add_annotation(
+                    x=row['datetime'],
+                    y=row['close'],
+                    text=row['datetime'].strftime('%H:%M'),  # Display the time
+                    showarrow=True,
+                    arrowhead=2,
+                    ax=0,  # Position of arrow tail (x offset)
+                    ay=-20,  # Position of arrow tail (y offset)
+                    xanchor='center',
+                    yanchor='bottom',
+                    row=1, col=1  # Position on the volume subplot
+                )
+
 
         # Update layout
-        fig.update_layout(title=f'BankNifty from {previous_date.strftime("%Y-%m-%d")} to {next_date.strftime("%Y-%m-%d")}',
-                          xaxis_title='Date :' + str(event_date),
+        fig.update_layout(title=f'DATES :{previous_date.strftime("%Y-%m-%d")} | {event_date.strftime("%Y-%m-%d")} | {next_date.strftime("%Y-%m-%d")}',
+                          xaxis_title='Event' + str(event_date.strftime("%Y-%m-%d")),
                           yaxis_title='Price',
                           xaxis_rangeslider_visible=False,
-                          height=750, width=1800)
+                          height=850, width=1800)
 
         # # Update range breaks
-        #rangebreaks = [dict(bounds=[15.45, 9.15], pattern="hour"), dict(bounds=["sat", "mon"]), dict(values=datemissing)]
-        #fig.update_xaxes(rangebreaks=rangebreaks)
+        # rangebreaks = [dict(bounds=[15.45, 9.15], pattern="hour"), dict(bounds=["sat", "mon"]), dict(values=datemissing)]
+        # fig.update_xaxes(rangebreaks=rangebreaks)
+        # print(datemissing)
 
-        fig.update_xaxes(type='category') ### this fixes the issue i spent the whole day on
+        # fig.update_xaxes(type='category') ### this fixes the issue i spent the whole day on
+        #
+        # fig.update_xaxes(
+        #     showticklabels=False  # Hide all x-axis labels
+        # )
 
         fig.update_xaxes(
-            showticklabels=False  # Hide all x-axis labels
+             type='category',  # Treat x-axis values as categorical
+            # tickvals=days_to_plot['datetime'],  # Use datetime values as tick positions
+             #ticktext=days_to_plot['datetime'].dt.strftime('%H:%M'), # Format tick labels to show only time
+            # tickangle=-45,  # Tilt the labels for readability
+            showticklabels=False  # Ensure tick labels are displayed
         )
+
+
+
+        # tickvals = pd.date_range(start=days_to_plot['datetime'].min(), end=days_to_plot['datetime'].max(), freq='1h')
+        # fig.update_xaxes(
+        #     tickvals=tickvals,  # Use the provided DatetimeIndex for tick positions
+        #     tickformat='%H:%M',  # Show only the time (hours and minutes)
+        #     showticklabels=True,  # Show tick labels
+        #     tickangle=-45,  # Optional: Adjust the angle of the labels for better readability
+        #     rangebreaks=[
+        #         dict(bounds=["17:00", "09:00"], pattern="hour"),  # Hide overnight hours
+        #         dict(bounds=["sat", "mon"]),  # Hide weekends
+        #     ]
+        # )
+
+        #tickvals = pd.date_range(start=days_to_plot['datetime'].min(), end=days_to_plot['datetime'].max(), freq='1h')
+        #
+        #
+        # print(tickvals)
+        # fig.update_xaxes(
+        #     tickvals=tickvals,  # Use the provided DatetimeIndex for tick positions
+        #     tickformat='%H:%M',  # Show only the time (hours and minutes)
+        #     showticklabels=True,  # Show tick labels
+        #     tickangle=-45,  # Optional: Adjust the angle of the labels for better readability
+        #     rangebreaks=[
+        #         dict(bounds=["9:15", "15:15"], pattern="hour"),  # Hide overnight hours
+        #         dict(bounds=["sat", "mon"]),  # Hide weekends
+        #     ]
+        # )
+
+        # fig.update_xaxes(
+        #     tickformat="%H:%M",  # Show only the time in hours and minutes
+        #     dtick=5000000  # Set tick interval to 30 minutes (1800000 milliseconds)
+        # )
+
 
         # Identify the end of each day (EOD)
         eod_times = days_to_plot.groupby(days_to_plot['date'].dt.date)['datetime'].max()
