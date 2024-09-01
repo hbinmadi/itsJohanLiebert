@@ -1,15 +1,18 @@
 import sqlite3
 import pandas as pd
 import plotly.graph_objects as go
+import psutil
 from plotly.subplots import make_subplots
-from dash import Dash, html, dcc, Input, Output
-
+from dash import Dash, html, dcc, Input, Output, State, callback_context
+import gc
+import time
 # Connect to the SQLite database
 db_path = 'data/IntradayGGData.db'  # Replace with the path to your database file
 conn = sqlite3.connect(db_path)
 
 # Load the data from the BankNifty table
 banknifty_data = pd.read_sql_query("SELECT * FROM banknifty;", conn)
+
 
 # Convert the datetime column to datetime if it's not already
 banknifty_data['datetime'] = pd.to_datetime(banknifty_data['datetime'])
@@ -33,151 +36,275 @@ daily_range['range'] = daily_range['daily_high'] - daily_range['daily_low']
 # Filter days with a one-sided move of 500 points or more
 one_sided_days = daily_range[daily_range['range'] >= 500].copy()
 
-# Function to identify V-shaped movements
-def identify_v_shaped_movement(df):
-    df['open_close_diff'] = df['close'] - df['open']
-    df['intraday_high_low_diff'] = df['high'] - df['low']
-
-    v_shaped_days = df[
-        ((df['open_close_diff'] > 0) & ((df['open'] - df['low']) >= 250) & ((df['high'] - df['close']) <= 50)) |
-        ((df['open_close_diff'] < 0) & ((df['high'] - df['open']) >= 250) & ((df['close'] - df['low']) <= 50))
-        ].copy()
-
-    return v_shaped_days
-
-# Apply this logic to the BankNifty data to find V-shaped days
-v_shaped_days = identify_v_shaped_movement(banknifty_data)
-
-# Combine one-sided and V-shaped moves
-significant_days = pd.concat([one_sided_days, v_shaped_days], ignore_index=True).drop_duplicates()
-
-# Function to find the nearest previous or next trading day
-def find_nearest_day(df, target_date, direction='previous'):
-    if direction == 'previous':
-        return df[df['date'] < target_date]['date'].max()
-    elif direction == 'next':
-        return df[df['date'] > target_date]['date'].min()
 
 # Add previous and next days
+def find_nearest_day(df, target_date, direction='previous'):
+    if direction == 'previous':
+        return df[df['date'] < target_date]['date'].max() or target_date
+    elif direction == 'next':
+        return df[df['date'] > target_date]['date'].min() or target_date
+
+
+significant_days = one_sided_days
 significant_days['previous_day'] = significant_days['date'].apply(
     lambda x: find_nearest_day(daily_range, x, 'previous'))
 significant_days['next_day'] = significant_days['date'].apply(lambda x: find_nearest_day(daily_range, x, 'next'))
 
 # Calculate the AD Line (weighted) and its EMA, along with weighted volume
-# Assuming 'adline' and 'volume' columns exist in the banknifty_data DataFrame
-#banknifty_data['ad_lineweighted'] = banknifty_data['AD_line']  # Use your logic for weighted AD Line
 banknifty_data['ema_9'] = banknifty_data['AD_LineWeighted'].ewm(span=9, adjust=False).mean()
-#banknifty_data['weighted_volume'] = banknifty_data['volume']  # Use your logic for weighted volume
 
 # Determine whether the close is higher or lower than the previous close
-banknifty_data['volume_color'] = ['green' if banknifty_data['close'].iloc[i] >= banknifty_data['close'].iloc[i-1] else 'red'
-                                  for i in range(len(banknifty_data))]
+banknifty_data['volume_color'] = [
+    'green' if banknifty_data['close'].iloc[i] >= banknifty_data['open'].iloc[i] else 'red'
+    for i in range(len(banknifty_data))]
 
-def GetMissingDatesInRange(fromdate ,todate,existing_dates):
-    # Define the start and end dates
+# Step 1: Ensure date columns are in datetime format
+banknifty_data['date'] = pd.to_datetime(banknifty_data['date'])
+significant_days['date'] = pd.to_datetime(significant_days['date'])
+significant_days['previous_day'] = pd.to_datetime(significant_days['previous_day'])
+significant_days['next_day'] = pd.to_datetime(significant_days['next_day'])
+
+
+
+
+
+# Step 2: Create a list of unique dates to keep in banknifty_data
+unique_dates = pd.concat([
+    significant_days['date'],
+    significant_days['previous_day'],
+    significant_days['next_day']
+]).unique()
+
+# Step 3: Filter banknifty_data to keep only the rows with dates in the unique_dates list
+banknifty_data = banknifty_data[banknifty_data['date'].isin(unique_dates)]
+
+# Reset the index
+significant_days.reset_index(drop=True, inplace=True)
+
+significant_days.to_csv("significant_days.csv")
+
+# Write the DataFrame to the SQLite database
+# If the table already exists, you can replace it or append to it.
+banknifty_data.to_sql('banknifty_data', conn, if_exists='replace', index=False)
+
+# Close the connection
+conn.close()
+
+def GetMissingDatesInRange(fromdate, todate, existing_dates):
     start_date = fromdate
     end_date = todate
 
-    # Create a list of all dates within the range
     all_dates = pd.date_range(start=start_date, end=end_date)
-
-
-
-    # Convert existing_dates to datetime objects
     existing_dates = pd.to_datetime(existing_dates)
-
-    # Find the missing dates
     missing_dates = all_dates[~all_dates.isin(existing_dates)]
-
-    # Convert missing_dates to a list of strings
     missing_dates_list = missing_dates.strftime('%Y-%m-%d').tolist()
 
-    #print("Missing dates:", missing_dates_list)
     return missing_dates_list
+#
+#
+# banknifty_data['date'] = pd.to_datetime(banknifty_data['date'])
+# existing_dates = banknifty_data['date'].unique()
+# datemissing = GetMissingDatesInRange(banknifty_data['date'].min(), banknifty_data['date'].max(), existing_dates)
+# datemissing = pd.to_datetime(datemissing)
+
+del banknifty_data
 
 
 
-
-banknifty_data['date'] = pd.to_datetime(banknifty_data['date'])
-existing_dates = banknifty_data['date'].unique()
-datemissing = GetMissingDatesInRange(banknifty_data['date'].min(), banknifty_data['date'].max(), existing_dates)
-datemissing = pd.to_datetime(datemissing)
-
+print("Loading data is called.... once")
 
 
 
 # Initialize the Dash app
 app = Dash(__name__)
 
-# Layout of the Dash app
+# Update slider marks dynamically
 app.layout = html.Div([
-    html.H1("BankNifty Event Days Candlestick Charts"),
+    dcc.Graph(id='candlestick-chart'),
     dcc.Slider(
         id='chart-slider',
         min=0,
         max=len(significant_days) - 1,
         value=0,
-        marks={i: f'Event {i + 1}' for i in range(len(significant_days))},
+        marks={i: significant_days['date'].iloc[i].strftime('%Y-%m-%d') for i in range(len(significant_days))},
         step=1,
     ),
-    dcc.Graph(id='candlestick-chart')
+    html.Div([
+        html.Button('Previous', id='previous-button', n_clicks=0),
+        html.Button('Next', id='next-button', n_clicks=0)
+    ]),
 ])
 
-# Callback to update the chart based on slider value
 @app.callback(
     Output('candlestick-chart', 'figure'),
     [Input('chart-slider', 'value')]
 )
 def update_chart(slider_value):
-    event_day = significant_days.iloc[slider_value]
-    event_date = event_day['date']
-    previous_date = event_day['previous_day']
-    next_date = event_day['next_day']
+    try:
+        # Memory usage before processing
+        #start_time = time.time()
 
-    # Filter data for the event day, previous day, and next day
-    days_to_plot = banknifty_data[(banknifty_data['date'] >= previous_date) & (banknifty_data['date'] <= next_date)]
 
-    # Create subplots: 3 rows, 1 column
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                        row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.05,
-                        subplot_titles=('Candlestick', 'AD Line (Weighted) with EMA 9', 'Weighted Volume'))
 
-    # Candlestick chart
-    fig.add_trace(go.Candlestick(x=days_to_plot['datetime'],
-                                 open=days_to_plot['open'],
-                                 high=days_to_plot['high'],
-                                 low=days_to_plot['low'],
-                                 close=days_to_plot['close']),
-                  row=1, col=1)
+        process = psutil.Process()
+        mem_before = process.memory_info().rss / (1024 ** 2)
+        print(f"Memory usage before processing: {mem_before:.2f} MB",slider_value)
 
-    # AD Line with EMA 9
-    fig.add_trace(go.Scatter(x=days_to_plot['datetime'], y=days_to_plot['AD_LineWeighted'],
-                             mode='lines', name='AD Line (Weighted)'),
-                  row=2, col=1)
-    fig.add_trace(go.Scatter(x=days_to_plot['datetime'], y=days_to_plot['ema_9'],
-                             mode='lines', name='EMA 9', line=dict(color='orange')),
-                  row=2, col=1)
+        event_day = significant_days.iloc[slider_value]
+        event_date, previous_date, next_date = event_day['date'], event_day['previous_day'], event_day['next_day']
 
-    # Weighted Volume with color change based on close price movement
-    fig.add_trace(go.Bar(x=days_to_plot['datetime'], y=days_to_plot['weighted_volume'],
-                         name='Weighted Volume',
-                         marker=dict(color=days_to_plot['volume_color'])),
-                  row=3, col=1)
+        # Connect to the SQLite database
+        conn = sqlite3.connect(db_path)
 
-    fig.update_layout(title=f'BankNifty from {previous_date.strftime("%Y-%m-%d")} to {next_date.strftime("%Y-%m-%d")}',
-                      xaxis_title='Date',
-                      yaxis_title='Price',
-                      xaxis_rangeslider_visible=False)
 
-    # Range breaks for non-trading hours, weekends, and missing dates
-    rangebreaks = [dict(bounds=[15.45, 9.15], pattern="hour"), dict(bounds=["sat", "mon"]), dict(values=datemissing)]
-    fig.update_xaxes(rangebreaks=rangebreaks)
+        # Query the data for the selected date range
+        query = f"""
+                SELECT * 
+                FROM banknifty_data 
+                WHERE DATE(date) IN ('{previous_date.strftime("%Y-%m-%d")}', '{event_date.strftime("%Y-%m-%d")}', '{next_date.strftime("%Y-%m-%d")}')
+                """
+        #print(query)
+        days_to_plot = pd.read_sql_query(query, conn)
+        #print(days_to_plot)
+        # Close the connection
+        conn.close()
+        days_to_plot['date'] = pd.to_datetime(days_to_plot['date'])
+        # Find existing dates
+        # existing_dates = days_to_plot['date'].unique()
+        #
+        # # Calculate missing dates within the selected range
+        # # Find the missing dates within the range
+        # datemissing = GetMissingDatesInRange(days_to_plot['date'].min(), days_to_plot['date'].max(), existing_dates)
+        #
+        # # Convert missing dates back to datetime format
+        # datemissing = pd.to_datetime(datemissing)
+        # print('datemissing',datemissing)
+        # Filter the data
+        #days_to_plot = banknifty_data[(banknifty_data['date'] >= previous_date) & (banknifty_data['date'] <= next_date)]
 
-    # Update layout dimensions
-    fig.update_layout(height=800, width=1700)
+        # Initialize the figure
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.7, 0.15, 0.15], vertical_spacing=0.02)
 
-    return fig
+        # Candlestick chart
+        fig.add_trace(go.Candlestick(x=days_to_plot['datetime'],
+                                     open=days_to_plot['open'],
+                                     high=days_to_plot['high'],
+                                     low=days_to_plot['low'],
+                                     close=days_to_plot['close'],
+                                     increasing_line_color='green',  # Color for increasing candles
+                                     decreasing_line_color='black',  # Color for decreasing candles
+                                     increasing_fillcolor='green',  # Solid color for increasing candles
+                                     decreasing_fillcolor='black'  # Solid color for decreasing candles
+                                     ),
+                      row=1, col=1)
 
+        # AD Line (Weighted)
+        fig.add_trace(go.Scatter(x=days_to_plot['datetime'], y=days_to_plot['AD_LineWeighted'],
+                                 mode='lines', name='AD Line (Weighted)'),
+                      row=2, col=1)
+
+        # EMA 9
+        fig.add_trace(go.Scatter(x=days_to_plot['datetime'], y=days_to_plot['ema_9'],
+                                 mode='lines', name='EMA 9', line=dict(color='green')),
+                      row=2, col=1)
+
+        # Weighted Volume
+        fig.add_trace(go.Bar(x=days_to_plot['datetime'], y=days_to_plot['weighted_volume'],
+                             name='Weighted Volume',
+                             marker=dict(color=days_to_plot['volume_color'])),
+                      row=3, col=1)
+
+        # Update layout
+        fig.update_layout(title=f'BankNifty from {previous_date.strftime("%Y-%m-%d")} to {next_date.strftime("%Y-%m-%d")}',
+                          xaxis_title='Date :' + str(event_date),
+                          yaxis_title='Price',
+                          xaxis_rangeslider_visible=False,
+                          height=750, width=1800)
+
+        # # Update range breaks
+        #rangebreaks = [dict(bounds=[15.45, 9.15], pattern="hour"), dict(bounds=["sat", "mon"]), dict(values=datemissing)]
+        #fig.update_xaxes(rangebreaks=rangebreaks)
+
+        fig.update_xaxes(type='category') ### this fixes the issue i spent the whole day on
+
+        fig.update_xaxes(
+            showticklabels=False  # Hide all x-axis labels
+        )
+
+        # Identify the end of each day (EOD)
+        eod_times = days_to_plot.groupby(days_to_plot['date'].dt.date)['datetime'].max()
+
+        # Add vertical lines at EOD
+        for eod in eod_times:
+            fig.add_shape(
+                type="line",
+                x0=eod, x1=eod,
+                y0=0, y1=1,
+                xref="x", yref="paper",
+                line=dict(color="Blue", width=1, dash="dot")
+            )
+
+        # Memory usage after processing
+        mem_after = process.memory_info().rss / (1024 ** 2)
+        print(f"Memory usage after processing: {mem_after:.2f} MB")
+        print(f"Memory used for this execution: {mem_after - mem_before:.2f} MB")
+
+        # Cleanup: Delete unnecessary objects and run garbage collection
+        del days_to_plot
+        #del datemissing
+        #del rangebreaks
+        gc.collect()
+
+        end_time = time.time()
+        #print(f"Callback execution time: {end_time - start_time:.2f} seconds")
+        #print("Figure generated:", fig)
+        return fig
+
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        return go.Figure()
+
+
+# Callback to move slider value up or down based on button clicks
+@app.callback(
+    Output('chart-slider', 'value'),
+    [Input('previous-button', 'n_clicks'),
+     Input('next-button', 'n_clicks')],
+    [State('chart-slider', 'value')]
+)
+def move_slider(previous_clicks, next_clicks, current_value):
+    ctx = callback_context
+
+    # Debugging: print the current state
+    print("Current Value:", current_value)
+    print("Previous Clicks:", previous_clicks)
+    print("Next Clicks:", next_clicks)
+
+    if not ctx.triggered:
+        return current_value
+
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    # Debugging information
+    print("Button ID:", button_id)
+    print("Length of significant_days:", len(significant_days))
+
+    if button_id == 'previous-button':
+        new_value = max(0, current_value - 1)
+    elif button_id == 'next-button':
+        new_value = min(len(significant_days) - 1, current_value + 1)
+    else:
+        new_value = current_value
+
+    # Ensure that the new value is within the bounds
+    new_value = max(0, min(new_value, len(significant_days) - 1))
+
+    # Print the new value for debugging
+    print("New Value:", new_value)
+
+    return new_value
+import io
 # Run the Dash app
 if __name__ == '__main__':
-    app.run_server(debug=True)
+    app.run_server(debug=True, port=8051)
+
