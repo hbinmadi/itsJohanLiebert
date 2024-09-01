@@ -124,16 +124,18 @@ app = Dash(__name__)
 
 app.layout = html.Div([
     html.Div([
-        dcc.Slider(
-            id='chart-slider',
-            min=0,
-            max=len(significant_days) - 1,
-            value=0,
-            marks={i: significant_days['date'].iloc[i].strftime('%Y-%m-%d') for i in range(len(significant_days))},
-            step=1,
-            updatemode='drag',  # Updates the slider value on drag for better UX
-            tooltip={"placement": "bottom", "always_visible": True}
-
+        html.Div(
+            dcc.Slider(
+                id='chart-slider',
+                min=0,
+                max=len(significant_days) - 1,
+                value=0,
+                marks={i: significant_days['date'].iloc[i].strftime('%Y-%m-%d') for i in range(len(significant_days))},
+                step=1,
+                updatemode='drag',  # Updates the slider value on drag for better UX
+                tooltip={"placement": "bottom", "always_visible": True}
+            ),
+            style={'width': '900px'}  # Set the slider width to 500 pixels
         ),
         html.Div([
             html.Button('Previous', id='previous-button', n_clicks=0),
@@ -236,13 +238,13 @@ def update_chart(slider_value):
                     ay=-20,  # Position of arrow tail (y offset)
                     xanchor='center',
                     yanchor='bottom',
+                    opacity=0.6,  # Set text opacity to 60%
                     row=1, col=1  # Position on the volume subplot
                 )
 
 
         # Update layout
-        fig.update_layout(title=f'DATES :{previous_date.strftime("%Y-%m-%d")} | {event_date.strftime("%Y-%m-%d")} | {next_date.strftime("%Y-%m-%d")}',
-                          xaxis_title='Event' + str(event_date.strftime("%Y-%m-%d")),
+        fig.update_layout(title=f'DATES :{previous_date.strftime("%Y-%m-%d")}                                                     |                  {event_date.strftime("%Y-%m-%d")}                                                | {next_date.strftime("%Y-%m-%d")}',
                           yaxis_title='Price',
                           xaxis_rangeslider_visible=False,
                           height=850, width=1800)
