@@ -1,1 +1,156 @@
+import sqlite3
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import os
+
+# Connect to the SQLite database
+db_path = 'data/IntradayGGData.db'  # Replace with the path to your database file
+conn = sqlite3.connect(db_path)
+
+# Load the data from the BankNifty table
+banknifty_data = pd.read_sql_query("SELECT * FROM banknifty;", conn)
+
+# Convert the datetime column to datetime if it's not already
+banknifty_data['datetime'] = pd.to_datetime(banknifty_data['datetime'])
+
+# Extract just the date part for grouping
+banknifty_data['date'] = banknifty_data['datetime'].dt.date
+banknifty_data['date'] = pd.to_datetime(banknifty_data['date'])
+
+# Filter for dates greater than 31-12-2020
+banknifty_data = banknifty_data[banknifty_data['date'] > pd.to_datetime('2020-12-31')]
+
+# Group data by date and calculate the daily high and low
+daily_range = banknifty_data.groupby('date').agg(
+    daily_high=('high', 'max'),
+    daily_low=('low', 'min')
+).reset_index()
+
+# Calculate the daily range
+daily_range['range'] = daily_range['daily_high'] - daily_range['daily_low']
+
+# Filter days with a one-sided move of 500 points or more
+one_sided_days = daily_range[daily_range['range'] >= 350].copy()
+
+# Add previous and next days
+def find_nearest_day(df, target_date, direction='previous'):
+    if direction == 'previous':
+        return df[df['date'] < target_date]['date'].max() or target_date
+    elif direction == 'next':
+        return df[df['date'] > target_date]['date'].min() or target_date
+
+significant_days = one_sided_days
+significant_days['previous_day'] = significant_days['date'].apply(
+    lambda x: find_nearest_day(daily_range, x, 'previous'))
+significant_days['next_day'] = significant_days['date'].apply(lambda x: find_nearest_day(daily_range, x, 'next'))
+
+# Create directory for saving images if it doesn't exist
+output_dir = "event_day_images"
+os.makedirs(output_dir, exist_ok=True)
+
+# Iterate through each significant day and generate and save the plot
+for index, event_day in significant_days.iterrows():
+    event_date, previous_date, next_date = event_day['date'], event_day['previous_day'], event_day['next_day']
+
+    # Query the data for the selected date range
+    query = f"""
+            SELECT * 
+            FROM banknifty_data 
+            WHERE DATE(date) IN ('{previous_date.strftime("%Y-%m-%d")}', '{event_date.strftime("%Y-%m-%d")}', '{next_date.strftime("%Y-%m-%d")}')
+            """
+    days_to_plot = pd.read_sql_query(query, conn)
+
+    # Convert date columns to datetime
+    days_to_plot['date'] = pd.to_datetime(days_to_plot['date'])
+    days_to_plot['datetime'] = pd.to_datetime(days_to_plot['datetime'])
+
+    # Initialize the figure
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.7, 0.15, 0.15], vertical_spacing=0.02)
+
+    # Candlestick chart
+    fig.add_trace(go.Candlestick(x=days_to_plot['datetime'],
+                                 open=days_to_plot['open'],
+                                 high=days_to_plot['high'],
+                                 low=days_to_plot['low'],
+                                 close=days_to_plot['close'],
+                                 increasing_line_color='green',  # Color for increasing candles
+                                 decreasing_line_color='black',  # Color for decreasing candles
+                                 increasing_fillcolor='green',  # Solid color for increasing candles
+                                 decreasing_fillcolor='black'  # Solid color for decreasing candles
+                                 ),
+                  row=1, col=1)
+
+    # AD Line (Weighted)
+    fig.add_trace(go.Scatter(x=days_to_plot['datetime'], y=days_to_plot['AD_LineWeighted'],
+                             mode='lines', name='AD Line (Weighted)'),
+                  row=2, col=1)
+
+    # EMA 9
+    fig.add_trace(go.Scatter(x=days_to_plot['datetime'], y=days_to_plot['ema_9'],
+                             mode='lines', name='EMA 9', line=dict(color='green')),
+                  row=2, col=1)
+
+    # Weighted Volume
+    fig.add_trace(go.Bar(x=days_to_plot['datetime'], y=days_to_plot['weighted_volume'],
+                         name='Weighted Volume',
+                         marker=dict(color=days_to_plot['volume_color'])),
+                  row=3, col=1)
+
+    # Update layout
+    fig.update_layout(title=f'Dates: {previous_date.strftime("%Y-%m-%d")} | {event_date.strftime("%Y-%m-%d")} | {next_date.strftime("%Y-%m-%d")}',
+                      yaxis_title='Price',
+                      xaxis_rangeslider_visible=False,
+                      height=850, width=1800)
+
+    # Identify the end of each day (EOD)
+    eod_times = days_to_plot.groupby(days_to_plot['date'].dt.date)['datetime'].max()
+
+    # Add vertical lines at EOD
+    for eod in eod_times:
+        fig.add_shape(
+            type="line",
+            x0=eod, x1=eod,
+            y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(color="Blue", width=1, dash="dot")
+        )
+
+    for i, row in days_to_plot.iterrows():
+        if row['datetime'].minute % 60 == 0:  # Check if the time is at a 30-minute interval
+            fig.add_annotation(
+                x=row['datetime'],
+                y=row['close'],
+                text=row['datetime'].strftime('%H:%M'),  # Display the time
+                showarrow=True,
+                arrowhead=2,
+                ax=0,  # Position of arrow tail (x offset)
+                ay=-20,  # Position of arrow tail (y offset)
+                xanchor='center',
+                yanchor='bottom',
+                opacity=0.6,  # Set text opacity to 60%
+                row=1, col=1  # Position on the volume subplot
+            )
+    fig.update_layout(
+        title=f'DATES :{previous_date.strftime("%Y-%m-%d")}                                                     |                  {event_date.strftime("%Y-%m-%d")}                                                | {next_date.strftime("%Y-%m-%d")}',
+        yaxis_title='Price',
+        xaxis_rangeslider_visible=False,
+        height=850, width=1800)
+
+    fig.update_xaxes(
+        type='category',  # Treat x-axis values as categorical
+        # tickvals=days_to_plot['datetime'],  # Use datetime values as tick positions
+        # ticktext=days_to_plot['datetime'].dt.strftime('%H:%M'), # Format tick labels to show only time
+        # tickangle=-45,  # Tilt the labels for readability
+        showticklabels=False  # Ensure tick labels are displayed
+    )
+
+    # Save the figure as an image
+    output_file = os.path.join(output_dir, f'event_day_{event_date.strftime("%Y%m%d")}.png')
+    fig.show()
+    fig.write_image(output_file, engine="orca")
+    print(f"Saved: {output_file}")
+
+# Close the connection
+conn.close()
 
